@@ -18,3 +18,6 @@ jemalloc.
 The ChangeLog file contains a brief summary of changes for each release.
 
 URL: https://jemalloc.net/
+
+Tuning info:
+https://github.com/jemalloc/jemalloc/blob/dev/TUNING.md
