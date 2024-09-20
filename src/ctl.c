@@ -103,6 +103,8 @@ CTL_PROTO(opt_hpa_slab_max_alloc)
 CTL_PROTO(opt_hpa_hugification_threshold)
 CTL_PROTO(opt_hpa_hugify_delay_ms)
 CTL_PROTO(opt_hpa_min_purge_interval_ms)
+CTL_PROTO(opt_experimental_hpa_strict_min_purge_interval)
+CTL_PROTO(opt_experimental_hpa_max_purge_nhp)
 CTL_PROTO(opt_hpa_dirty_mult)
 CTL_PROTO(opt_hpa_sec_nshards)
 CTL_PROTO(opt_hpa_sec_max_alloc)
@@ -129,6 +131,7 @@ CTL_PROTO(opt_zero)
 CTL_PROTO(opt_utrace)
 CTL_PROTO(opt_xmalloc)
 CTL_PROTO(opt_experimental_infallible_new)
+CTL_PROTO(opt_experimental_tcache_gc)
 CTL_PROTO(opt_max_batched_size)
 CTL_PROTO(opt_remote_free_max)
 CTL_PROTO(opt_remote_free_max_batch)
@@ -195,6 +198,7 @@ CTL_PROTO(arenas_dirty_decay_ms)
 CTL_PROTO(arenas_muzzy_decay_ms)
 CTL_PROTO(arenas_quantum)
 CTL_PROTO(arenas_page)
+CTL_PROTO(arenas_hugepage)
 CTL_PROTO(arenas_tcache_max)
 CTL_PROTO(arenas_nbins)
 CTL_PROTO(arenas_nhbins)
@@ -458,6 +462,10 @@ static const ctl_named_node_t opt_node[] = {
 		CTL(opt_hpa_hugification_threshold)},
 	{NAME("hpa_hugify_delay_ms"), CTL(opt_hpa_hugify_delay_ms)},
 	{NAME("hpa_min_purge_interval_ms"), CTL(opt_hpa_min_purge_interval_ms)},
+	{NAME("experimental_hpa_strict_min_purge_interval"),
+		CTL(opt_experimental_hpa_strict_min_purge_interval)},
+	{NAME("experimental_hpa_max_purge_nhp"),
+		CTL(opt_experimental_hpa_max_purge_nhp)},
 	{NAME("hpa_dirty_mult"), CTL(opt_hpa_dirty_mult)},
 	{NAME("hpa_sec_nshards"),	CTL(opt_hpa_sec_nshards)},
 	{NAME("hpa_sec_max_alloc"),	CTL(opt_hpa_sec_max_alloc)},
@@ -487,6 +495,8 @@ static const ctl_named_node_t opt_node[] = {
 	{NAME("xmalloc"),	CTL(opt_xmalloc)},
 	{NAME("experimental_infallible_new"),
 		CTL(opt_experimental_infallible_new)},
+	{NAME("experimental_tcache_gc"),
+		CTL(opt_experimental_tcache_gc)},
 	{NAME("max_batched_size"),	CTL(opt_max_batched_size)},
 	{NAME("remote_free_max"),	CTL(opt_remote_free_max)},
 	{NAME("remote_free_max_batch"),	CTL(opt_remote_free_max_batch)},
@@ -593,6 +603,7 @@ static const ctl_named_node_t arenas_node[] = {
 	{NAME("muzzy_decay_ms"), CTL(arenas_muzzy_decay_ms)},
 	{NAME("quantum"),	CTL(arenas_quantum)},
 	{NAME("page"),		CTL(arenas_page)},
+	{NAME("hugepage"),	CTL(arenas_hugepage)},
 	{NAME("tcache_max"),	CTL(arenas_tcache_max)},
 	{NAME("nbins"),		CTL(arenas_nbins)},
 	{NAME("nhbins"),	CTL(arenas_nhbins)},
@@ -1375,7 +1386,7 @@ ctl_refresh(tsdn_t *tsdn) {
 	const unsigned narenas = ctl_arenas->narenas;
 	assert(narenas > 0);
 	ctl_arena_t *ctl_sarena = arenas_i(MALLCTL_ARENAS_ALL);
-	VARIABLE_ARRAY(arena_t *, tarenas, narenas);
+	VARIABLE_ARRAY_UNSAFE(arena_t *, tarenas, narenas);
 
 	/*
 	 * Clear sum stats, since they will be merged into by
@@ -2191,6 +2202,10 @@ CTL_RO_NL_GEN(opt_hpa_hugification_threshold,
 CTL_RO_NL_GEN(opt_hpa_hugify_delay_ms, opt_hpa_opts.hugify_delay_ms, uint64_t)
 CTL_RO_NL_GEN(opt_hpa_min_purge_interval_ms, opt_hpa_opts.min_purge_interval_ms,
     uint64_t)
+CTL_RO_NL_GEN(opt_experimental_hpa_strict_min_purge_interval,
+    opt_hpa_opts.experimental_strict_min_purge_interval, bool)
+CTL_RO_NL_GEN(opt_experimental_hpa_max_purge_nhp,
+    opt_hpa_opts.experimental_max_purge_nhp, ssize_t)
 
 /*
  * This will have to change before we publicly document this option; fxp_t and
@@ -2231,6 +2246,7 @@ CTL_RO_NL_CGEN(config_utrace, opt_utrace, opt_utrace, bool)
 CTL_RO_NL_CGEN(config_xmalloc, opt_xmalloc, opt_xmalloc, bool)
 CTL_RO_NL_CGEN(config_enable_cxx, opt_experimental_infallible_new,
     opt_experimental_infallible_new, bool)
+CTL_RO_NL_GEN(opt_experimental_tcache_gc, opt_experimental_tcache_gc, bool)
 CTL_RO_NL_GEN(opt_max_batched_size, opt_bin_info_max_batched_size, size_t)
 CTL_RO_NL_GEN(opt_remote_free_max, opt_bin_info_remote_free_max,
     size_t)
@@ -2720,7 +2736,7 @@ arena_i_decay(tsdn_t *tsdn, unsigned arena_ind, bool all) {
 		 */
 		if (arena_ind == MALLCTL_ARENAS_ALL || arena_ind == narenas) {
 			unsigned i;
-			VARIABLE_ARRAY(arena_t *, tarenas, narenas);
+			VARIABLE_ARRAY_UNSAFE(arena_t *, tarenas, narenas);
 
 			for (i = 0; i < narenas; i++) {
 				tarenas[i] = arena_get(tsdn, i, false);
@@ -3153,7 +3169,7 @@ arena_i_name_ctl(tsd_t *tsd, const size_t *mib, size_t miblen,
     void *oldp, size_t *oldlenp, void *newp, size_t newlen) {
 	int ret;
 	unsigned arena_ind;
-	char *name;
+	char *name JEMALLOC_CLANG_ANALYZER_SILENCE_INIT(NULL);
 
 	malloc_mutex_lock(tsd_tsdn(tsd), &ctl_mtx);
 	MIB_UNSIGNED(arena_ind, 1);
@@ -3284,6 +3300,7 @@ arenas_muzzy_decay_ms_ctl(tsd_t *tsd, const size_t *mib, size_t miblen,
 
 CTL_RO_NL_GEN(arenas_quantum, QUANTUM, size_t)
 CTL_RO_NL_GEN(arenas_page, PAGE, size_t)
+CTL_RO_NL_GEN(arenas_hugepage, HUGEPAGE, size_t)
 CTL_RO_NL_GEN(arenas_tcache_max, global_do_not_change_tcache_maxclass, size_t)
 CTL_RO_NL_GEN(arenas_nbins, SC_NBINS, unsigned)
 CTL_RO_NL_GEN(arenas_nhbins, global_do_not_change_tcache_nbins, unsigned)
