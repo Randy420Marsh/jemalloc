@@ -8,6 +8,16 @@
 
 #define HPA_EDEN_SIZE (128 * HUGEPAGE)
 
+#define HPA_MIN_VAR_VEC_SIZE 8
+#ifdef JEMALLOC_HAVE_PROCESS_MADVISE
+typedef struct iovec hpa_io_vector_t;
+#else
+typedef struct {
+	void *iov_base;
+	size_t iov_len;
+} hpa_io_vector_t;
+#endif
+
 static edata_t *hpa_alloc(tsdn_t *tsdn, pai_t *self, size_t size,
     size_t alignment, bool zero, bool guarded, bool frequent_reuse,
     bool *deferred_work_generated);
@@ -23,6 +33,11 @@ static void hpa_dalloc(tsdn_t *tsdn, pai_t *self, edata_t *edata,
 static void hpa_dalloc_batch(tsdn_t *tsdn, pai_t *self,
     edata_list_active_t *list, bool *deferred_work_generated);
 static uint64_t hpa_time_until_deferred_work(tsdn_t *tsdn, pai_t *self);
+
+bool
+hpa_hugepage_size_exceeds_limit() {
+	return HUGEPAGE > HUGEPAGE_MAX_EXPECTED_SIZE;
+}
 
 bool
 hpa_supported(void) {
@@ -52,10 +67,15 @@ hpa_supported(void) {
 		return false;
 	}
 	/* As mentioned in pages.h, do not support If HUGEPAGE is too large. */
-	if (HUGEPAGE > HUGEPAGE_MAX_EXPECTED_SIZE) {
+	if (hpa_hugepage_size_exceeds_limit()) {
 		return false;
 	}
 	return true;
+}
+
+static bool
+hpa_peak_demand_tracking_enabled(hpa_shard_t *shard) {
+	return shard->opts.peak_demand_window_ms > 0;
 }
 
 static void
@@ -77,7 +97,6 @@ hpa_central_init(hpa_central_t *central, base_t *base, const hpa_hooks_t *hooks)
 	central->base = base;
 	central->eden = NULL;
 	central->eden_len = 0;
-	central->age_counter = 0;
 	central->hooks = *hooks;
 	return false;
 }
@@ -90,7 +109,7 @@ hpa_alloc_ps(tsdn_t *tsdn, hpa_central_t *central) {
 
 static hpdata_t *
 hpa_central_extract(tsdn_t *tsdn, hpa_central_t *central, size_t size,
-    bool *oom) {
+    uint64_t age, bool *oom) {
 	/* Don't yet support big allocations; these should get filtered out. */
 	assert(size <= HUGEPAGE);
 	/*
@@ -113,7 +132,7 @@ hpa_central_extract(tsdn_t *tsdn, hpa_central_t *central, size_t size,
 			malloc_mutex_unlock(tsdn, &central->grow_mtx);
 			return NULL;
 		}
-		hpdata_init(ps, central->eden, central->age_counter++);
+		hpdata_init(ps, central->eden, age);
 		central->eden = NULL;
 		central->eden_len = 0;
 		malloc_mutex_unlock(tsdn, &central->grow_mtx);
@@ -163,7 +182,7 @@ hpa_central_extract(tsdn_t *tsdn, hpa_central_t *central, size_t size,
 	assert(central->eden_len % HUGEPAGE == 0);
 	assert(HUGEPAGE_ADDR2BASE(central->eden) == central->eden);
 
-	hpdata_init(ps, central->eden, central->age_counter++);
+	hpdata_init(ps, central->eden, age);
 
 	char *eden_char = (char *)central->eden;
 	eden_char += HUGEPAGE;
@@ -210,7 +229,13 @@ hpa_shard_init(hpa_shard_t *shard, hpa_central_t *central, emap_t *emap,
 	shard->stats.npurge_passes = 0;
 	shard->stats.npurges = 0;
 	shard->stats.nhugifies = 0;
+	shard->stats.nhugify_failures = 0;
 	shard->stats.ndehugifies = 0;
+
+	if (hpa_peak_demand_tracking_enabled(shard)) {
+		peak_demand_init(&shard->peak_demand,
+		    shard->opts.peak_demand_window_ms);
+	}
 
 	/*
 	 * Fill these in last, so that if an hpa_shard gets used despite
@@ -242,6 +267,7 @@ hpa_shard_nonderived_stats_accum(hpa_shard_nonderived_stats_t *dst,
 	dst->npurge_passes += src->npurge_passes;
 	dst->npurges += src->npurges;
 	dst->nhugifies += src->nhugifies;
+	dst->nhugify_failures += src->nhugify_failures;
 	dst->ndehugifies += src->ndehugifies;
 }
 
@@ -288,8 +314,37 @@ hpa_ndirty_max(tsdn_t *tsdn, hpa_shard_t *shard) {
 	if (shard->opts.dirty_mult == (fxp_t)-1) {
 		return (size_t)-1;
 	}
-	return fxp_mul_frac(psset_nactive(&shard->psset),
-	    shard->opts.dirty_mult);
+	/*
+	 * We are trying to estimate maximum amount of active memory we'll
+	 * need in the near future.  We do so by projecting future active
+	 * memory demand (based on peak active memory usage we observed in the
+	 * past within sliding window) and adding slack on top of it (an
+	 * overhead is reasonable to have in exchange of higher hugepages
+	 * coverage).  When peak demand tracking is off, projection of future
+	 * active memory is active memory we are having right now.
+	 *
+	 * Estimation is essentially the same as nactive_max * (1 +
+	 * dirty_mult), but expressed differently to factor in necessary
+	 * implementation details.
+	 */
+	size_t nactive = psset_nactive(&shard->psset);
+	size_t nactive_max = nactive;
+	if (hpa_peak_demand_tracking_enabled(shard)) {
+		/*
+		 * We release shard->mtx, when we do a syscall to purge dirty
+		 * memory, so someone might grab shard->mtx, allocate memory
+		 * from this shard and update psset's nactive counter, before
+		 * peak_demand_update(...) was called and we'll get
+		 * peak_demand_nactive_max(...) <= nactive as a result.
+		 */
+		size_t peak = peak_demand_nactive_max(&shard->peak_demand);
+		if (peak > nactive_max) {
+			nactive_max = peak;
+		}
+	}
+	size_t slack = fxp_mul_frac(nactive_max, shard->opts.dirty_mult);
+	size_t estimation = nactive_max + slack;
+	return estimation - nactive;
 }
 
 static bool
@@ -377,6 +432,24 @@ hpa_shard_has_deferred_work(tsdn_t *tsdn, hpa_shard_t *shard) {
 	return to_hugify != NULL || hpa_should_purge(tsdn, shard);
 }
 
+/* If we fail vectorized purge, we will do single */
+static void
+hpa_try_vectorized_purge(hpa_shard_t *shard, hpa_io_vector_t *vec,
+	size_t vlen, size_t nbytes) {
+	bool success = opt_process_madvise_max_batch > 0
+		&& !shard->central->hooks.vectorized_purge(vec, vlen, nbytes);
+	if (!success) {
+		/* On failure, it is safe to purge again (potential perf
+		 * penalty) If kernel can tell exactly which regions
+		 * failed, we could avoid that penalty.
+		 */
+		for (size_t i = 0; i < vlen; ++i) {
+			shard->central->hooks.purge(vec[i].iov_base,
+				vec[i].iov_len);
+		}
+	}
+}
+
 /* Returns whether or not we purged anything. */
 static bool
 hpa_try_purge(tsdn_t *tsdn, hpa_shard_t *shard) {
@@ -425,14 +498,37 @@ hpa_try_purge(tsdn_t *tsdn, hpa_shard_t *shard) {
 	}
 	size_t total_purged = 0;
 	uint64_t purges_this_pass = 0;
+
+	assert(opt_process_madvise_max_batch <=
+		PROCESS_MADVISE_MAX_BATCH_LIMIT);
+	size_t len = opt_process_madvise_max_batch == 0 ?
+		HPA_MIN_VAR_VEC_SIZE : opt_process_madvise_max_batch;
+	VARIABLE_ARRAY(hpa_io_vector_t, vec, len);
+
 	void *purge_addr;
 	size_t purge_size;
+	size_t cur = 0;
+	size_t total_batch_bytes = 0;
 	while (hpdata_purge_next(to_purge, &purge_state, &purge_addr,
 	    &purge_size)) {
+		vec[cur].iov_base = purge_addr;
+		vec[cur].iov_len = purge_size;
 		total_purged += purge_size;
 		assert(total_purged <= HUGEPAGE);
 		purges_this_pass++;
-		shard->central->hooks.purge(purge_addr, purge_size);
+		total_batch_bytes += purge_size;
+		cur++;
+		if (cur == len) {
+			hpa_try_vectorized_purge(shard, vec, len, total_batch_bytes);
+			assert(total_batch_bytes > 0);
+			cur = 0;
+			total_batch_bytes = 0;
+		}
+	}
+
+	/* Batch was not full */
+	if (cur > 0) {
+		hpa_try_vectorized_purge(shard, vec, cur, total_batch_bytes);
 	}
 
 	malloc_mutex_lock(tsdn, &shard->mtx);
@@ -499,10 +595,23 @@ hpa_try_hugify(tsdn_t *tsdn, hpa_shard_t *shard) {
 
 	malloc_mutex_unlock(tsdn, &shard->mtx);
 
-	shard->central->hooks.hugify(hpdata_addr_get(to_hugify), HUGEPAGE);
+	bool err = shard->central->hooks.hugify(hpdata_addr_get(to_hugify),
+	    HUGEPAGE, shard->opts.hugify_sync);
 
 	malloc_mutex_lock(tsdn, &shard->mtx);
 	shard->stats.nhugifies++;
+	if (err) {
+		/*
+		 * When asynchronious hugification is used
+		 * (shard->opts.hugify_sync option is false), we are not
+		 * expecting to get here, unless something went terrible wrong.
+		 * Because underlying syscall is only setting kernel flag for
+		 * memory range (actual hugification happens asynchroniously
+		 * and we are not getting any feedback about its outcome), we
+		 * expect syscall to be successful all the time.
+		 */
+		shard->stats.nhugify_failures++;
+	}
 
 	psset_update_begin(&shard->psset, to_hugify);
 	hpdata_hugify(to_hugify);
@@ -529,6 +638,16 @@ static void
 hpa_shard_maybe_do_deferred_work(tsdn_t *tsdn, hpa_shard_t *shard,
     bool forced) {
 	malloc_mutex_assert_owner(tsdn, &shard->mtx);
+
+	/* Update active memory demand statistics. */
+	if (hpa_peak_demand_tracking_enabled(shard)) {
+		nstime_t now;
+		shard->central->hooks.curtime(&now,
+		    /* first_reading */ true);
+		peak_demand_update(&shard->peak_demand, &now,
+		    psset_nactive(&shard->psset));
+	}
+
 	if (!forced && shard->opts.deferral_allowed) {
 		return;
 	}
@@ -687,7 +806,7 @@ hpa_alloc_batch_psset(tsdn_t *tsdn, hpa_shard_t *shard, size_t size,
     bool *deferred_work_generated) {
 	assert(size <= HUGEPAGE);
 	assert(size <= shard->opts.slab_max_alloc ||
-	    size == sz_index2size(sz_size2index(size)));
+	    size == sz_s2u(size));
 	bool oom = false;
 
 	size_t nsuccess = hpa_try_alloc_batch_no_grow(tsdn, shard, size, &oom,
@@ -718,7 +837,8 @@ hpa_alloc_batch_psset(tsdn_t *tsdn, hpa_shard_t *shard, size_t size,
 	 * deallocations (and allocations of smaller sizes) may still succeed
 	 * while we're doing this potentially expensive system call.
 	 */
-	hpdata_t *ps = hpa_central_extract(tsdn, shard->central, size, &oom);
+	hpdata_t *ps = hpa_central_extract(tsdn, shard->central, size,
+	    shard->age_counter++, &oom);
 	if (ps == NULL) {
 		malloc_mutex_unlock(tsdn, &shard->grow_mtx);
 		return nsuccess;

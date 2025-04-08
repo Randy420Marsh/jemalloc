@@ -92,6 +92,32 @@ AC_LANG_POP([C++])
 JE_CONCAT_VVV(CXXFLAGS, CONFIGURE_CXXFLAGS, SPECIFIED_CXXFLAGS)
 ])
 
+CONFIGURE_LDFLAGS=
+SPECIFIED_LDFLAGS="${LDFLAGS}"
+dnl JE_LDFLAGS_ADD(ldflag)
+dnl
+dnl LDFLAGS is the concatenation of CONFIGURE_LDFLAGS and SPECIFIED_LDFLAGS
+dnl This macro appends to CONFIGURE_LDFLAGS and regenerates LDFLAGS.
+AC_DEFUN([JE_LDFLAGS_ADD],
+[
+AC_MSG_CHECKING([whether linker supports $1])
+T_CONFIGURE_LDFLAGS="${CONFIGURE_LDFLAGS}"
+JE_APPEND_VS(CONFIGURE_LDFLAGS, $1)
+JE_CONCAT_VVV(LDFLAGS, CONFIGURE_LDFLAGS, SPECIFIED_LDFLAGS)
+AC_LINK_IFELSE([AC_LANG_PROGRAM(
+[[
+]], [[
+    return 0;
+]])],
+              [je_cv_ldflags_added=$1]
+              AC_MSG_RESULT([yes]),
+              [je_cv_ldflags_added=]
+              AC_MSG_RESULT([no])
+              [CONFIGURE_LDFLAGS="${T_CONFIGURE_LDFLAGS}"]
+)
+JE_CONCAT_VVV(LDFLAGS, CONFIGURE_LDFLAGS, SPECIFIED_LDFLAGS)
+])
+
 dnl JE_COMPILABLE(label, hcode, mcode, rvar)
 dnl
 dnl Use AC_LINK_IFELSE() rather than AC_COMPILE_IFELSE() so that linker errors
@@ -1375,6 +1401,23 @@ if test "x$enable_stats" = "x1" ; then
 fi
 AC_SUBST([enable_stats])
 
+dnl Disable reading configuration from file and environment variable
+AC_ARG_ENABLE([user_config],
+  [AS_HELP_STRING([--disable-user-config],
+  [Do not read malloc config from /etc/malloc.conf or MALLOC_CONF])],
+[if test "x$enable_user_config" = "xno" ; then
+  enable_user_config="0"
+else
+  enable_user_config="1"
+fi
+],
+[enable_user_config="1"]
+)
+if test "x$enable_user_config" = "x1" ; then
+  AC_DEFINE([JEMALLOC_CONFIG_ENV], [ ], [ ])
+  AC_DEFINE([JEMALLOC_CONFIG_FILE], [ ], [ ])
+fi
+
 dnl Do not enable smallocx by default.
 AC_ARG_ENABLE([experimental_smallocx],
   [AS_HELP_STRING([--enable-experimental-smallocx], [Enable experimental smallocx API])],
@@ -2471,6 +2514,16 @@ if test "x${je_cv_madvise}" = "xyes" ; then
 	madvise((void *)0, 0, MADV_HUGEPAGE);
 	madvise((void *)0, 0, MADV_NOHUGEPAGE);
 ], [je_cv_thp])
+  case "${host_cpu}" in
+    arm*)
+      ;;
+    *)
+    if test "x${je_cv_thp}" = "xyes" ; then
+      AC_DEFINE([JEMALLOC_HAVE_MADVISE_HUGE], [ ], [ ])
+    fi
+    ;;
+  esac
+
   dnl Check for madvise(..., MADV_[NO]CORE).
   JE_COMPILABLE([madvise(..., MADV_[[NO]]CORE)], [
 #include <sys/mman.h>
@@ -2481,15 +2534,27 @@ if test "x${je_cv_madvise}" = "xyes" ; then
   if test "x${je_cv_madv_nocore}" = "xyes" ; then
     AC_DEFINE([JEMALLOC_MADVISE_NOCORE], [ ], [ ])
   fi
-case "${host_cpu}" in
-  arm*)
-    ;;
-  *)
-  if test "x${je_cv_thp}" = "xyes" ; then
-    AC_DEFINE([JEMALLOC_HAVE_MADVISE_HUGE], [ ], [ ])
+
+  dnl Check for madvise(..., MADV_COLLAPSE).
+  JE_COMPILABLE([madvise(..., MADV_COLLAPSE)], [
+#include <sys/mman.h>
+], [
+	madvise((void *)0, 0, MADV_COLLAPSE);
+], [je_cv_madv_collapse])
+  if test "x${je_cv_madv_collapse}" = "xyes" ; then
+    AC_DEFINE([JEMALLOC_HAVE_MADVISE_COLLAPSE], [ ], [ ])
   fi
-  ;;
-esac
+
+  dnl Check for process_madvise
+  JE_COMPILABLE([process_madvise(2)], [
+#include <sys/mman.h>
+#include <sys/syscall.h>
+], [
+	syscall(SYS_process_madvise, 0, (void *)0, 0, 0, 0);
+], [je_cv_process_madvise])
+  if test "x${je_cv_process_madvise}" = "xyes" ; then
+    AC_DEFINE([JEMALLOC_HAVE_PROCESS_MADVISE], [ ], [ ])
+  fi
 else
   dnl Check for posix_madvise.
   JE_COMPILABLE([posix_madvise], [
@@ -2636,6 +2701,40 @@ if test "x$enable_pageid" = "x1" ; then
   AC_DEFINE([JEMALLOC_PAGEID], [ ], [ ])
 fi
 
+AC_ARG_ENABLE([tsan],
+  [AS_HELP_STRING([--enable-tsan],
+                  [Enable thread sanitizer])],
+[if test "x$enable_tsan" = "xno" ; then
+  enable_tsan="0"
+else
+  enable_tsan="1"
+fi
+],
+[enable_tsan="0"]
+)
+if test "x$enable_tsan" = "x1" ; then
+  JE_CFLAGS_ADD([-fsanitize=thread])
+  JE_CXXFLAGS_ADD([-fsanitize=thread])
+  JE_LDFLAGS_ADD([-fsanitize=thread])
+fi
+
+AC_ARG_ENABLE([ubsan],
+  [AS_HELP_STRING([--enable-ubsan],
+                  [Enable undefined behavior sanitizer])],
+[if test "x$enable_ubsan" = "xno" ; then
+  enable_ubsan="0"
+else
+  enable_ubsan="1"
+fi
+],
+[enable_ubsan="0"]
+)
+if test "x$enable_ubsan" = "x1" ; then
+  JE_CFLAGS_ADD([-fsanitize=undefined])
+  JE_CXXFLAGS_ADD([-fsanitize=undefined])
+  JE_LDFLAGS_ADD([-fsanitize=undefined])
+fi
+
 dnl ============================================================================
 dnl Enable background threads if possible.
 
@@ -2643,6 +2742,24 @@ if test "x${have_pthread}" = "x1" -a "x${je_cv_os_unfair_lock}" != "xyes" -a \
        "x${abi}" != "xmacho" ; then
   AC_DEFINE([JEMALLOC_BACKGROUND_THREAD], [ ], [ ])
 fi
+
+dnl ============================================================================
+dnl Limit the gap between two contiguous usizes to be at most PAGE.
+AC_ARG_ENABLE([limit_usize_gap],
+  [AS_HELP_STRING([--enable-limit-usize-gap],
+                  [Limit the gap between two contiguous usizes])],
+[if test "x$limit_usize_gap" = "xno" ; then
+  limit_usize_gap="0"
+else
+  limit_usize_gap="1"
+fi
+],
+[limit_usize_gap="0"]
+)
+if test "x$limit_usize_gap" = "x1" ; then
+  AC_DEFINE([LIMIT_USIZE_GAP], [ ])
+fi
+AC_SUBST([limit_usize_gap])
 
 dnl ============================================================================
 dnl Check for glibc malloc hooks
@@ -2695,6 +2812,15 @@ if test "x${je_cv_pthread_mutex_adaptive_np}" = "xyes" ; then
   AC_DEFINE([JEMALLOC_HAVE_PTHREAD_MUTEX_ADAPTIVE_NP], [ ], [ ])
 fi
 
+JE_COMPILABLE([gettid], [
+#include <unistd.h>
+], [
+  int tid = gettid();
+], [je_cv_gettid])
+if test "x${je_cv_gettid}" = "xyes" ; then
+  AC_DEFINE([JEMALLOC_HAVE_GETTID], [ ], [ ])
+fi
+
 JE_CFLAGS_SAVE()
 JE_CFLAGS_ADD([-D_GNU_SOURCE])
 JE_CFLAGS_ADD([-Werror])
@@ -2709,9 +2835,19 @@ JE_COMPILABLE([strerror_r returns char with gnu source], [
   char *error = strerror_r(EINVAL, buffer, 100);
   printf("%s\n", error);
 ], [je_cv_strerror_r_returns_char_with_gnu_source])
+if test "x${je_cv_strerror_r_returns_char_with_gnu_source}" = "xno" ; then
+  JE_COMPILABLE([strerror_r header only], [
+#include <errno.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+], [], [je_cv_strerror_r_header_pass])
+fi
 JE_CFLAGS_RESTORE()
 if test "x${je_cv_strerror_r_returns_char_with_gnu_source}" = "xyes" ; then
   AC_DEFINE([JEMALLOC_STRERROR_R_RETURNS_CHAR_WITH_GNU_SOURCE], [ ], [ ])
+elif test "x${je_cv_strerror_r_header_pass}" = "xno" ; then
+  AC_MSG_ERROR([cannot determine return type of strerror_r])
 fi
 
 dnl ============================================================================
@@ -2849,7 +2985,8 @@ AC_MSG_RESULT([CXX                : ${CXX}])
 AC_MSG_RESULT([CONFIGURE_CXXFLAGS : ${CONFIGURE_CXXFLAGS}])
 AC_MSG_RESULT([SPECIFIED_CXXFLAGS : ${SPECIFIED_CXXFLAGS}])
 AC_MSG_RESULT([EXTRA_CXXFLAGS     : ${EXTRA_CXXFLAGS}])
-AC_MSG_RESULT([LDFLAGS            : ${LDFLAGS}])
+AC_MSG_RESULT([CONFIGURE_LDFLAGS  : ${CONFIGURE_LDFLAGS}])
+AC_MSG_RESULT([SPECIFIED_LDFLAGS  : ${SPECIFIED_LDFLAGS}])
 AC_MSG_RESULT([EXTRA_LDFLAGS      : ${EXTRA_LDFLAGS}])
 AC_MSG_RESULT([DSO_LDFLAGS        : ${DSO_LDFLAGS}])
 AC_MSG_RESULT([LIBS               : ${LIBS}])
@@ -2881,6 +3018,7 @@ AC_MSG_RESULT([static libs        : ${enable_static}])
 AC_MSG_RESULT([autogen            : ${enable_autogen}])
 AC_MSG_RESULT([debug              : ${enable_debug}])
 AC_MSG_RESULT([stats              : ${enable_stats}])
+AC_MSG_RESULT([user_config        : ${enable_user_config}])
 AC_MSG_RESULT([experimental_smallocx : ${enable_experimental_smallocx}])
 AC_MSG_RESULT([prof               : ${enable_prof}])
 AC_MSG_RESULT([prof-libunwind     : ${enable_prof_libunwind}])
@@ -2896,4 +3034,7 @@ AC_MSG_RESULT([cache-oblivious    : ${enable_cache_oblivious}])
 AC_MSG_RESULT([pageid             : ${enable_pageid}])
 AC_MSG_RESULT([cxx                : ${enable_cxx}])
 AC_MSG_RESULT([dss                : ${enable_dss}])
+AC_MSG_RESULT([tsan               : ${enable_tsan}])
+AC_MSG_RESULT([ubsan              : ${enable_ubsan}])
+AC_MSG_RESULT([limit-usize-gap    : ${limit_usize_gap}])
 AC_MSG_RESULT([===============================================================================])

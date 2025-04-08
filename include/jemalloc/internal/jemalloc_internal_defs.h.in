@@ -309,6 +309,13 @@
 #undef JEMALLOC_HAVE_MADVISE_HUGE
 
 /*
+ * Defined if best-effort synchronous collapse of the native
+ * pages mapped by the memory range into transparent huge pages is supported
+ * via MADV_COLLAPSE arguments to madvise(2).
+ */
+#undef JEMALLOC_HAVE_MADVISE_COLLAPSE
+
+/*
  * Methods for purging unused pages differ between operating systems.
  *
  *   madvise(..., MADV_FREE) : This marks pages as being unused, such that they
@@ -337,6 +344,9 @@
  * Defined if MADV_[NO]CORE is supported as an argument to madvise.
  */
 #undef JEMALLOC_MADVISE_NOCORE
+
+/* Defined if process_madvise(2) is available. */
+#undef JEMALLOC_HAVE_PROCESS_MADVISE
 
 /* Defined if mprotect(2) is available. */
 #undef JEMALLOC_HAVE_MPROTECT
@@ -404,6 +414,9 @@
 /* Adaptive mutex support in pthreads. */
 #undef JEMALLOC_HAVE_PTHREAD_MUTEX_ADAPTIVE_NP
 
+/* gettid() support */
+#undef JEMALLOC_HAVE_GETTID
+
 /* GNU specific sched_getcpu support */
 #undef JEMALLOC_HAVE_SCHED_GETCPU
 
@@ -464,6 +477,12 @@
 
 /* If defined, use __int128 for optimization. */
 #undef JEMALLOC_HAVE_INT128
+
+/*
+ * If defined, the gap between any two contiguous usizes should not exceed
+ * PAGE.
+ */
+#undef LIMIT_USIZE_GAP
 
 #include "jemalloc/internal/jemalloc_internal_overrides.h"
 

@@ -841,10 +841,47 @@ stats_arena_hpa_shard_sec_print(emitter_t *emitter, unsigned i) {
 static void
 stats_arena_hpa_shard_counters_print(emitter_t *emitter, unsigned i,
     uint64_t uptime) {
+	size_t npageslabs;
+	size_t nactive;
+	size_t ndirty;
+
+	size_t npageslabs_nonhuge;
+	size_t nactive_nonhuge;
+	size_t ndirty_nonhuge;
+	size_t nretained_nonhuge;
+
+	size_t npageslabs_huge;
+	size_t nactive_huge;
+	size_t ndirty_huge;
+
 	uint64_t npurge_passes;
 	uint64_t npurges;
 	uint64_t nhugifies;
+	uint64_t nhugify_failures;
 	uint64_t ndehugifies;
+
+	CTL_M2_GET("stats.arenas.0.hpa_shard.npageslabs",
+	    i, &npageslabs, size_t);
+	CTL_M2_GET("stats.arenas.0.hpa_shard.nactive",
+	    i, &nactive, size_t);
+	CTL_M2_GET("stats.arenas.0.hpa_shard.ndirty",
+	    i, &ndirty, size_t);
+
+	CTL_M2_GET("stats.arenas.0.hpa_shard.slabs.npageslabs_nonhuge",
+	    i, &npageslabs_nonhuge, size_t);
+	CTL_M2_GET("stats.arenas.0.hpa_shard.slabs.nactive_nonhuge",
+	    i, &nactive_nonhuge, size_t);
+	CTL_M2_GET("stats.arenas.0.hpa_shard.slabs.ndirty_nonhuge",
+	    i, &ndirty_nonhuge, size_t);
+	nretained_nonhuge = npageslabs_nonhuge * HUGEPAGE_PAGES
+	    - nactive_nonhuge - ndirty_nonhuge;
+
+	CTL_M2_GET("stats.arenas.0.hpa_shard.slabs.npageslabs_huge",
+	    i, &npageslabs_huge, size_t);
+	CTL_M2_GET("stats.arenas.0.hpa_shard.slabs.nactive_huge",
+	    i, &nactive_huge, size_t);
+	CTL_M2_GET("stats.arenas.0.hpa_shard.slabs.ndirty_huge",
+	    i, &ndirty_huge, size_t);
 
 	CTL_M2_GET("stats.arenas.0.hpa_shard.npurge_passes",
 	    i, &npurge_passes, uint64_t);
@@ -852,20 +889,39 @@ stats_arena_hpa_shard_counters_print(emitter_t *emitter, unsigned i,
 	    i, &npurges, uint64_t);
 	CTL_M2_GET("stats.arenas.0.hpa_shard.nhugifies",
 	    i, &nhugifies, uint64_t);
+	CTL_M2_GET("stats.arenas.0.hpa_shard.nhugify_failures",
+	    i, &nhugify_failures, uint64_t);
 	CTL_M2_GET("stats.arenas.0.hpa_shard.ndehugifies",
 	    i, &ndehugifies, uint64_t);
 
 	emitter_table_printf(emitter,
 	    "HPA shard stats:\n"
+	    "  Pageslabs: %zu (%zu huge, %zu nonhuge)\n"
+	    "  Active pages: %zu (%zu huge, %zu nonhuge)\n"
+	    "  Dirty pages: %zu (%zu huge, %zu nonhuge)\n"
+	    "  Retained pages: %zu\n"
 	    "  Purge passes: %" FMTu64 " (%" FMTu64 " / sec)\n"
 	    "  Purges: %" FMTu64 " (%" FMTu64 " / sec)\n"
 	    "  Hugeifies: %" FMTu64 " (%" FMTu64 " / sec)\n"
+	    "  Hugify failures: %" FMTu64 " (%" FMTu64 " / sec)\n"
 	    "  Dehugifies: %" FMTu64 " (%" FMTu64 " / sec)\n"
 	    "\n",
+	    npageslabs, npageslabs_huge, npageslabs_nonhuge,
+	    nactive, nactive_huge, nactive_nonhuge,
+	    ndirty, ndirty_huge, ndirty_nonhuge,
+	    nretained_nonhuge,
 	    npurge_passes, rate_per_second(npurge_passes, uptime),
 	    npurges, rate_per_second(npurges, uptime),
 	    nhugifies, rate_per_second(nhugifies, uptime),
+	    nhugify_failures, rate_per_second(nhugify_failures, uptime),
 	    ndehugifies, rate_per_second(ndehugifies, uptime));
+
+	emitter_json_kv(emitter, "npageslabs", emitter_type_size,
+	    &npageslabs);
+	emitter_json_kv(emitter, "nactive", emitter_type_size,
+	    &nactive);
+	emitter_json_kv(emitter, "ndirty", emitter_type_size,
+	    &ndirty);
 
 	emitter_json_kv(emitter, "npurge_passes", emitter_type_uint64,
 	    &npurge_passes);
@@ -873,8 +929,28 @@ stats_arena_hpa_shard_counters_print(emitter_t *emitter, unsigned i,
 	    &npurges);
 	emitter_json_kv(emitter, "nhugifies", emitter_type_uint64,
 	    &nhugifies);
+	emitter_json_kv(emitter, "nhugify_failures", emitter_type_uint64,
+	    &nhugify_failures);
 	emitter_json_kv(emitter, "ndehugifies", emitter_type_uint64,
 	    &ndehugifies);
+
+	emitter_json_object_kv_begin(emitter, "slabs");
+	emitter_json_kv(emitter, "npageslabs_nonhuge", emitter_type_size,
+	    &npageslabs_nonhuge);
+	emitter_json_kv(emitter, "nactive_nonhuge", emitter_type_size,
+	    &nactive_nonhuge);
+	emitter_json_kv(emitter, "ndirty_nonhuge", emitter_type_size,
+	    &ndirty_nonhuge);
+	emitter_json_kv(emitter, "nretained_nonhuge", emitter_type_size,
+	    &nretained_nonhuge);
+
+	emitter_json_kv(emitter, "npageslabs_huge", emitter_type_size,
+	    &npageslabs_huge);
+	emitter_json_kv(emitter, "nactive_huge", emitter_type_size,
+	    &nactive_huge);
+	emitter_json_kv(emitter, "ndirty_huge", emitter_type_size,
+	    &ndirty_huge);
+	emitter_json_object_end(emitter); /* End "slabs" */
 }
 
 static void
@@ -1578,8 +1654,10 @@ stats_general_print(emitter_t *emitter) {
 	OPT_WRITE_SIZE_T("hpa_slab_max_alloc")
 	OPT_WRITE_SIZE_T("hpa_hugification_threshold")
 	OPT_WRITE_UINT64("hpa_hugify_delay_ms")
+	OPT_WRITE_BOOL("hpa_hugify_sync")
 	OPT_WRITE_UINT64("hpa_min_purge_interval_ms")
 	OPT_WRITE_SSIZE_T("experimental_hpa_max_purge_nhp")
+	OPT_WRITE_UINT64("hpa_peak_demand_window_ms")
 	if (je_mallctl("opt.hpa_dirty_mult", (void *)&u32v, &u32sz, NULL, 0)
 	    == 0) {
 		/*
@@ -1603,6 +1681,7 @@ stats_general_print(emitter_t *emitter) {
 	OPT_WRITE_SIZE_T("hpa_sec_max_bytes")
 	OPT_WRITE_SIZE_T("hpa_sec_bytes_after_flush")
 	OPT_WRITE_SIZE_T("hpa_sec_batch_fill_extra")
+	OPT_WRITE_BOOL("huge_arena_pac_thp")
 	OPT_WRITE_CHAR_P("metadata_thp")
 	OPT_WRITE_INT64("mutex_max_spin")
 	OPT_WRITE_BOOL_MUTABLE("background_thread", "background_thread")
@@ -1650,6 +1729,7 @@ stats_general_print(emitter_t *emitter) {
 	OPT_WRITE_INT64("stats_interval")
 	OPT_WRITE_CHAR_P("stats_interval_opts")
 	OPT_WRITE_CHAR_P("zero_realloc")
+	OPT_WRITE_SIZE_T("process_madvise_max_batch")
 
 	emitter_dict_end(emitter); /* Close "opt". */
 
