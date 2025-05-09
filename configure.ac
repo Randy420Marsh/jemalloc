@@ -2457,6 +2457,13 @@ if test "x${je_cv_osatomic}" = "xyes" ; then
 fi
 
 dnl ============================================================================
+
+AC_ARG_WITH([experimental_sys_process_madvise],
+  [AS_HELP_STRING([--with-experimental-sys-process-madvise=<experimental-sys-process-madvise>],
+   [Force process_madvise and use experimental-sys-process-madvise number when making syscall])],
+  [je_cv_sys_pmadv_nr="${with_experimental_sys_process_madvise}"],
+  [je_cv_sys_pmadv_nr=""])
+
 dnl Check for madvise(2).
 
 JE_COMPILABLE([madvise(2)], [
@@ -2554,6 +2561,13 @@ if test "x${je_cv_madvise}" = "xyes" ; then
 ], [je_cv_process_madvise])
   if test "x${je_cv_process_madvise}" = "xyes" ; then
     AC_DEFINE([JEMALLOC_HAVE_PROCESS_MADVISE], [ ], [ ])
+  else
+    if test "x${je_cv_sys_pmadv_nr}" != "x" ; then
+      dnl Forcing experimental usage of process_madvise
+      AC_MSG_RESULT([Forcing usage of process_madvise with syscall nr=${je_cv_sys_pmadv_nr}])
+      AC_DEFINE([JEMALLOC_HAVE_PROCESS_MADVISE], [ ], [ ])
+      AC_DEFINE_UNQUOTED([EXPERIMENTAL_SYS_PROCESS_MADVISE_NR], [${je_cv_sys_pmadv_nr}], [ ])
+    fi
   fi
 else
   dnl Check for posix_madvise.
@@ -2742,24 +2756,6 @@ if test "x${have_pthread}" = "x1" -a "x${je_cv_os_unfair_lock}" != "xyes" -a \
        "x${abi}" != "xmacho" ; then
   AC_DEFINE([JEMALLOC_BACKGROUND_THREAD], [ ], [ ])
 fi
-
-dnl ============================================================================
-dnl Limit the gap between two contiguous usizes to be at most PAGE.
-AC_ARG_ENABLE([limit_usize_gap],
-  [AS_HELP_STRING([--enable-limit-usize-gap],
-                  [Limit the gap between two contiguous usizes])],
-[if test "x$limit_usize_gap" = "xno" ; then
-  limit_usize_gap="0"
-else
-  limit_usize_gap="1"
-fi
-],
-[limit_usize_gap="0"]
-)
-if test "x$limit_usize_gap" = "x1" ; then
-  AC_DEFINE([LIMIT_USIZE_GAP], [ ])
-fi
-AC_SUBST([limit_usize_gap])
 
 dnl ============================================================================
 dnl Check for glibc malloc hooks
@@ -3036,5 +3032,4 @@ AC_MSG_RESULT([cxx                : ${enable_cxx}])
 AC_MSG_RESULT([dss                : ${enable_dss}])
 AC_MSG_RESULT([tsan               : ${enable_tsan}])
 AC_MSG_RESULT([ubsan              : ${enable_ubsan}])
-AC_MSG_RESULT([limit-usize-gap    : ${limit_usize_gap}])
 AC_MSG_RESULT([===============================================================================])
